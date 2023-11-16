@@ -488,6 +488,12 @@ struct JackoNoteOut;
 struct JackoTransport;
 struct JackoState;
 
+class JackoState;
+
+typedef csound::heap_object_manager_t<JackoState> jacko_states;
+
+static JackoState *jacko_state_for_csound(CSOUND *csound);
+
 /**
 * There is one and only one JackoState instance per instance of Csound.
 * It is created by and only by the JackoInit opcode.
@@ -530,9 +536,14 @@ struct JackoState {
     std::mutex csoundPerformanceThreadConditionMutex;
     std::condition_variable csoundPerformanceThreadCondition;
     size_t sample_size;
-    JackoState(CSOUND *csound_, const char *serverName_, const char *clientName_)
-        : csound(csound_), serverName(serverName_), clientName(clientName_),
-          jacko_is_driving(false), /*jack_active(false),*/ jacko_has_finished(true) {
+    JackoState() {
+    }
+    int open(CSOUND *csound_, const char *serverName_, const char *clientName_) {
+        csound = csound_;
+        serverName = serverName_;
+        clientName = clientName_;
+        jacko_is_driving = false;
+        jacko_has_finished = true;
         int result = 0;
         csound = csound_;
         sample_size = sizeof(jack_default_audio_sample_t);
@@ -584,8 +595,9 @@ struct JackoState {
             csound->Message(
                 csound, "Failed to activate Jack client \"%s\": status %d.\n",
                 jack_get_client_name(jackClient), result);
-            return;
+            return NOTOK;
         }
+        return OK;
     }
     ~JackoState() {
     }
@@ -745,6 +757,19 @@ struct JackoState {
     }
 };
 
+static inline JackoState *jacko_state_for_csound(CSOUND *csound) {
+    int handle = 0;
+    auto jacko_state = jacko_states::instance().object_for_handle(csound, handle);
+    // std::fprintf(stderr, "jacko_states::jacko_state_for_csound: csound: %p handle: %d jacko_state: %p...\n", csound, handle, jacko_state);
+    if (jacko_state == nullptr) {
+        jacko_state = new JackoState;
+        handle = jacko_states::instance().handle_for_object(csound, jacko_state);
+    }
+    jacko_state = jacko_states::instance().object_for_handle(csound, handle);
+    // std::fprintf(stderr, "jacko_states::jacko_state: csound: %p handle: %d jacko_state: %p\n", csound, handle, jacko_state);
+    return jacko_state;
+}
+
 static int JackProcessCallback_(jack_nframes_t frames, void *data) {
     return ((JackoState *)data)->JackProcessCallback(frames);
 }
@@ -796,16 +821,15 @@ struct JackoInit : public OpcodeBase<JackoInit> {
                                          (char *)"default", (int)1);
         clientName = csound->strarg2name(csound, (char *)0, SclientName->data,
                                          (char *)"csound", (int)1);
-        JackoState *jackoState = new JackoState(csound, serverName, clientName);
-        int result = csound::CreateGlobalPointer(csound, "jackoState", jackoState);
+        JackoState *jackoState = jacko_state_for_csound(csound);
+        int result = jackoState->open(csound, serverName, clientName);
         return result;
     }
 };
 
 struct JackoInfo : public OpcodeBase<JackoInfo> {
     int init(CSOUND *csound) {
-        JackoState *jackoState = 0;
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
+        JackoState *jackoState = jacko_state_for_csound(csound);
         log(csound, "Jack information for client: %s\n", jackoState->clientName);
         log(csound, "  Daemon name:               %s\n", jackoState->serverName);
         log(csound, "  Frames per second:         %d\n",
@@ -862,8 +886,7 @@ struct JackoInfo : public OpcodeBase<JackoInfo> {
 struct JackoFreewheel : public OpcodeBase<JackoFreewheel> {
     MYFLT *ifreewheel;
     int init(CSOUND *csound) {
-        JackoState *jackoState = 0;
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
+        JackoState *jackoState = jacko_state_for_csound(csound);
         int freewheel = (int)*ifreewheel;
         int result = jack_set_freewheel(jackoState->jackClient, freewheel);
         if (result) {
@@ -882,8 +905,7 @@ struct JackoOn : public OpcodeBase<JackoOn> {
     MYFLT *jon;
     int init(CSOUND *csound) {
         int result = OK;
-        JackoState *jackoState = 0;
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
+        JackoState *jackoState = jacko_state_for_csound(csound);
         log(csound, "JackoOn is deprecated and now is a no-op.\n");
         return result;
     }
@@ -904,8 +926,8 @@ struct JackoAudioInConnect : public OpcodeBase<JackoAudioInConnect> {
     jack_port_t *externalPort;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         frames = opds.insdshead->ksmps;
         clientName = jack_get_client_name(jackoState->jackClient);
         csoundPortName = csound->strarg2name(
@@ -958,8 +980,8 @@ struct JackoAudioIn : public OpcodeBase<JackoAudioIn> {
     jack_nframes_t csoundFramesPerTick;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         csoundFramesPerTick = jackoState->csoundFramesPerTick;
         csoundPortName = csound->strarg2name(
                              csound, (char *)0, ScsoundPortName->data, (char *)"", (int)1);
@@ -996,8 +1018,8 @@ struct JackoAudioOutConnect : public OpcodeBase<JackoAudioOutConnect> {
     jack_port_t *externalPort;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         frames = opds.insdshead->ksmps;
         clientName = jack_get_client_name(jackoState->jackClient);
         csoundPortName = csound->strarg2name(
@@ -1049,8 +1071,8 @@ struct JackoAudioOut : public OpcodeBase<JackoAudioOut> {
     jack_nframes_t csoundFramesPerTick;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         csoundFramesPerTick = jackoState->csoundFramesPerTick;
         csoundPortName = csound->strarg2name(
                              csound, (char *)0, ScsoundPortName->data, (char *)"", (int)1);
@@ -1087,8 +1109,8 @@ struct JackoMidiInConnect : public OpcodeBase<JackoMidiInConnect> {
     jack_port_t *externalPort;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         frames = opds.insdshead->ksmps;
         clientName = jack_get_client_name(jackoState->jackClient);
         csoundPortName = csound->strarg2name(
@@ -1144,8 +1166,8 @@ struct JackoMidiOutConnect : public OpcodeBase<JackoMidiOutConnect> {
     jack_port_t *externalPort;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         frames = opds.insdshead->ksmps;
         clientName = jack_get_client_name(jackoState->jackClient);
         csoundPortName = csound->strarg2name(
@@ -1210,8 +1232,8 @@ struct JackoMidiOut : public OpcodeBase<JackoMidiOut> {
     jack_midi_data_t *buffer;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         csoundFramesPerTick = jackoState->csoundFramesPerTick;
         csoundPortName = csound->strarg2name(
                              csound, (char *)0, ScsoundPortName->data, (char *)"", (int)1);
@@ -1277,8 +1299,8 @@ struct JackoNoteOut : public OpcodeNoteoffBase<JackoNoteOut> {
     jack_midi_data_t *buffer;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
         int result = OK;
+        jackoState = jacko_state_for_csound(csound);
         csoundFramesPerTick = jackoState->csoundFramesPerTick;
         csoundPortName = csound->strarg2name(
                              csound, (char *)0, ScsoundPortName->data, (char *)"", (int)1);
@@ -1322,7 +1344,7 @@ struct JackoTransport : public OpcodeBase<JackoTransport> {
     double priorPositionSeconds;
     JackoState *jackoState;
     int init(CSOUND *csound) {
-        csound::QueryGlobalPointer(csound, "jackoState", jackoState);
+        jackoState = jacko_state_for_csound(csound);
         priorCommand = -1;
         priorPositionSeconds = 0.0;
         return kontrol(csound);
@@ -1444,7 +1466,7 @@ extern "C" {
         return err;
     }
 
-    PUBLIC int csoundModuleDestroy(CSOUND *csound) {
+    PUBLIC int csoundModuleDestroyx(CSOUND *csound) {
         if (csound->GetDebug(csound)) {
             csound->Message(csound, "jacko: csoundModuleDestroy(%p)...\n",
                             csound);
@@ -1464,5 +1486,18 @@ extern "C" {
                             csound);
         }
         return result;
+    }
+    
+    PUBLIC int csoundModuleDestroy(CSOUND *csound) {
+#if DEBUGGING
+        csound->Message(csound, "csoundModuleDestroy (Jacko opcodes): csound: %p thread: %ld...\n",
+                        csound,
+                        std::this_thread::get_id());
+#endif
+        jacko_states::instance().module_destroy(csound);
+#if DEBUGGING
+        csound->Message(csound, "csoundModuleDestroy (Jacko opcodes): csound: %p.\n", csound);
+#endif
+        return 0;
     }
 }
